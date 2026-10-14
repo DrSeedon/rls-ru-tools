@@ -90,6 +90,9 @@ def is_backdrop(tag):
     for mods, val in clicks:
         if '.self' in mods: return True                       # @click.self="close" - backdrop
         if not val: return True                               # bare @click.stop - only stops propagation
+    # full-screen backgrounds / pointer-geometry viewports: the real buttons live inside them, and a focused
+    # background swallows the D-pad (Taxi "Start ride" was unreachable). Handlers using clientX are pointer-only.
+    if any(re.search(r'background|viewport', v, re.I) for _, v in clicks): return True
     cls = ' '.join(re.findall(r'\sclass="([^"]*)"', tag))
     vals = ' '.join(v for _, v in clicks)
     if re.search(r'overlay|backdrop', cls) and re.search(r'close|cancel|dismiss|hide', vals, re.I): return True
