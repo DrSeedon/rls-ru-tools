@@ -12,7 +12,8 @@ Why: phone icons/cards are <div @click>, not <button>, so BeamNG's UI navigation
      only declare scopeTree; its root becomes the target scope).
   3. PhoneWrapper.vue: v-bng-scoped-nav "rls-phone" (no escaping the phone with the D-pad, Back closes
      app -> home -> phone, 300 ms double-back guard), focus on the first icon when opened with a controller,
-     visible focus ring.
+     visible focus ring, and stick scrolling: left/right stick scroll lists like a mouse wheel (when there is
+     nothing to scroll the left stick moves focus as before).
   4. PhoneHomescreen.vue: hidden icon pages / search page get bng-no-child-nav while not shown.
 
 Usage: python patch_phone_nav.py --mod-dir <unpacked mod> --out-dir <overlay> [--base-overlay <overlay>]
@@ -127,6 +128,8 @@ s = replace_once(s, 'import { vBngOnUiNav } from "@/common/directives"\n',
                  'import { setFocus as navSetFocus } from "@/services/uiNavFocus"\n'
                  'import useControls from "@/services/controls"\n', f)
 if 'const phoneRef' not in s and 'phoneRef = ref' not in s: die(f'{f}: phoneRef')
+for name in ('isEntered', 'onUnmounted'):
+    if not re.search(r'\b' + name + r'\b', s): die(f'{f}: {name}')
 SCRIPT = '''
 // --- gamepad patch: controller navigation scope for the phone (phone routes declare scopeTree {"rls-phone"}
 // in overhaul/uiRoutes.lua). Back: app -> home -> close; double-press guard 300 ms.
@@ -160,7 +163,97 @@ const phoneEntryFocus = () => {
   if (!el) return
   try { navSetFocus(el) } catch (_) { el.focus() }
 }
+// --- gamepad patch: sticks scroll the phone like a mouse wheel (left stick: focus_ud/focus_lr, right stick:
+// rotate_v_cam/rotate_h_cam). We catch the ui_nav event before the phone scope and crossfire see it: if there is
+// something to scroll on that axis we scroll it and swallow the event, otherwise it passes through unchanged
+// (the left stick then moves focus exactly as before). On release, focus jumps to a visible item.
+const STICK_EVENTS = { focus_ud: "v", focus_lr: "h", rotate_v_cam: "v", rotate_h_cam: "h" }
+const STICK_DEAD = 0.2
+const STICK_PX = 22 // px per frame at full deflection
+const stick = { v: 0, h: 0, area: { v: null, h: null }, pass: { v: false, h: false }, raf: 0 }
+const stickCanScroll = (el, ax) => {
+  const st = getComputedStyle(el)
+  const ov = ax === "v" ? st.overflowY : st.overflowX
+  if (ov !== "auto" && ov !== "scroll") return false
+  return ax === "v" ? el.scrollHeight > el.clientHeight + 1 : el.scrollWidth > el.clientWidth + 1
+}
+const stickVisible = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0 }
+const findStickArea = ax => {
+  const root = phoneRef.value
+  if (!root) return null
+  for (let n = document.activeElement; n && n !== root && root.contains(n); n = n.parentElement)
+    if (stickCanScroll(n, ax)) return n
+  let best = null, bestSize = 0
+  for (const n of root.querySelectorAll(".phone-content *")) {
+    if (!stickCanScroll(n, ax) || !stickVisible(n)) continue
+    const size = n.clientWidth * n.clientHeight
+    if (size > bestSize) { best = n; bestSize = size }
+  }
+  return best
+}
+const refocusVisible = area => {
+  if (!area || !area.isConnected) return
+  const ar = area.getBoundingClientRect()
+  const inView = el => {
+    const r = el.getBoundingClientRect()
+    return r.bottom > ar.top + 4 && r.top < ar.bottom - 4 && r.right > ar.left + 4 && r.left < ar.right - 4
+  }
+  const ae = document.activeElement
+  if (ae && area.contains(ae) && inView(ae)) return
+  const cand = [...area.querySelectorAll('[bng-nav-item]:not([bng-no-nav="true"]), button:not([disabled])')]
+    .filter(el => stickVisible(el) && inView(el))
+  if (!cand.length) return
+  cand.sort((a, b) => Math.abs(a.getBoundingClientRect().top - ar.top) - Math.abs(b.getBoundingClientRect().top - ar.top))
+  try { navSetFocus(cand[0]) } catch (_) { cand[0].focus() }
+}
+const stickLoop = () => {
+  stick.raf = 0
+  let moving = false
+  for (const ax of ["v", "h"]) {
+    const val = stick[ax], area = stick.area[ax]
+    if (!area || !area.isConnected || Math.abs(val) < STICK_DEAD) continue
+    const mag = (Math.abs(val) - STICK_DEAD) / (1 - STICK_DEAD)
+    let d = (ax === "v" ? -1 : 1) * Math.sign(val) * Math.pow(mag, 1.6) * STICK_PX
+    d = Math.sign(d) * Math.max(1, Math.abs(d))
+    if (ax === "v") area.scrollTop += d
+    else area.scrollLeft += d
+    moving = true
+  }
+  if (moving) stick.raf = requestAnimationFrame(stickLoop)
+}
+const onStickNav = e => {
+  const d = e.detail
+  const ax = d && STICK_EVENTS[d.name]
+  if (!ax) return
+  const root = phoneRef.value
+  if (!root || !document.contains(root) || !isEntered.value) return
+  const val = typeof d.value === "number" ? d.value : 0
+  if (Math.abs(val) < STICK_DEAD) { // released
+    stick.pass[ax] = false
+    if (stick.area[ax]) {
+      const area = stick.area[ax]
+      stick[ax] = 0
+      stick.area[ax] = null
+      refocusVisible(area)
+      e.stopPropagation()
+      e.preventDefault()
+    }
+    return
+  }
+  if (stick.pass[ax]) return // this press already went to normal navigation - keep it there until release
+  if (!stick.area[ax] || !stick.area[ax].isConnected) stick.area[ax] = findStickArea(ax)
+  if (!stick.area[ax]) { stick.pass[ax] = true; return } // nothing to scroll on this axis
+  stick[ax] = val
+  e.stopPropagation()
+  e.preventDefault()
+  if (!stick.raf) stick.raf = requestAnimationFrame(stickLoop)
+}
+onUnmounted(() => {
+  window.removeEventListener("ui_nav", onStickNav, true)
+  if (stick.raf) cancelAnimationFrame(stick.raf)
+})
 onMounted(() => {
+  window.addEventListener("ui_nav", onStickNav, true)
   focusScreenEntry("rls-phone", { force: true })
   if (!navControls.focusIfController) return
   setTimeout(phoneEntryFocus, 250)
