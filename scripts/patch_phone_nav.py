@@ -82,6 +82,20 @@ def tags(t):
             i += 1
 
 
+def is_backdrop(tag):
+    """Modal backdrops / click-stoppers are NOT buttons. Tagging them makes A (sent as a mouse click to the
+    focused element's ancestors too) hit the backdrop and close the dialog - e.g. App Store "Install" never ran."""
+    clicks = re.findall(r'(?:@click|v-on:click)((?:\.[\w]+)*)(="[^"]*")?', tag)
+    if not clicks: return False
+    for mods, val in clicks:
+        if '.self' in mods: return True                       # @click.self="close" - backdrop
+        if not val: return True                               # bare @click.stop - only stops propagation
+    cls = ' '.join(re.findall(r'\sclass="([^"]*)"', tag))
+    vals = ' '.join(v for _, v in clicks)
+    if re.search(r'overlay|backdrop', cls) and re.search(r'close|cancel|dismiss|hide', vals, re.I): return True
+    return False
+
+
 tagged = 0
 for f in sorted(targets):
     s = cur(f)
@@ -93,6 +107,7 @@ for f in sorted(targets):
         name = re.match(r'<([\w\-.]+)', tag).group(1)
         if name.lower() in SKIP_TAGS or name.endswith('Button') or (name.startswith('Bng') and name != 'BngCard'): continue
         if not re.search(r'(\s@click|\sv-on:click|\s@tap)\b', tag): continue   # real click targets only
+        if is_backdrop(tag): continue
         if re.search(r'bng-nav-item|bng-no-nav|v-bng-on-ui-nav', tag): continue
         tab = '' if re.search(r'[\s:]tabindex=', tag) else ' tabindex="0"'
         edits.append((st + 1 + len(name), NAV.format(tab=tab)))

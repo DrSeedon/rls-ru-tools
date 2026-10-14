@@ -14,7 +14,7 @@ Unofficial tools for **[RLS Career Overhaul](https://github.com/RLS-Modding/rls_
 
 Built against **RLS 2.7.2 + BeamNG.drive 0.39.4** (Windows). Phone navigation was verified in-game by driving BeamNG's
 `UINavigation` events (exactly what a gamepad sends in menus) and reading the DOM: focus lands on the first icon, the
-D-pad moves and can't leave the phone, A opens an app, B → home → closes. Feedback from real-controller play is welcome.
+D-pad moves and can't leave the phone, A opens an app, B → home → closes. Stick scrolling and the backdrop fix (14.10.2026) compile cleanly but are not yet confirmed in-game. Feedback from real-controller play is welcome.
 
 ## Requirements
 - Python 3.8+ (no extra packages)
@@ -55,9 +55,9 @@ Put the new zip into `%LOCALAPPDATA%\BeamNG\BeamNG.drive\current\mods\` and **mo
 ## What exactly the gamepad patch changes
 | File | Change |
 |---|---|
-| phone views + components (~33 files) | clickable non-buttons (`@click`/`@tap`) get `bng-nav-item tabindex="0" v-bng-on-ui-nav:ok.asMouse.focusRequired` — the same pattern RLS already uses for the garage computer. Pointer-only containers (map, page viewport, dock) are **not** tagged: tagging them sends focus into an invisible box. |
+| phone views + components (~33 files) | clickable non-buttons (`@click`/`@tap`) get `bng-nav-item tabindex="0" v-bng-on-ui-nav:ok.asMouse.focusRequired` — the same pattern RLS already uses for the garage computer. Pointer-only containers (map, page viewport, dock) are **not** tagged: tagging them sends focus into an invisible box. Modal backdrops (`@click.self="close"`, bare `@click.stop` wrappers, `*-overlay` with a close handler) are **not** tagged either: otherwise A also "clicks" the backdrop and closes the dialog (that broke App Store installs and bank/marketplace dialogs in our first version). |
 | `lua/ge/extensions/overhaul/uiRoutes.lua` | `phone*` routes get `scopeTree = {["rls-phone"] = {}}`. Runtime-registered mod routes can't declare `targetScope`; the scopeTree root becomes it. |
-| `PhoneWrapper.vue` | `v-bng-scoped-nav` scope `rls-phone` (no escaping the phone with the D-pad; Back = app → home → close; 300 ms double-press guard), focus on the first icon when opened with a controller, visible focus ring. |
+| `PhoneWrapper.vue` | `v-bng-scoped-nav` scope `rls-phone` (no escaping the phone with the D-pad; Back = app → home → close; 300 ms double-press guard), focus on the first icon when opened with a controller, visible focus ring. **Stick scrolling:** left and right stick scroll lists like a mouse wheel (for apps that have nothing to focus, only content to scroll); if there's nothing to scroll on that axis the left stick moves focus as before; on release focus jumps to a visible item. |
 | `PhoneHomescreen.vue` | inactive icon pages and the search page get `bng-no-child-nav`, so focus doesn't jump to invisible icons. |
 
 Every anchor is checked; on a different mod version the script stops with `ANCHOR NOT FOUND` instead of guessing.
