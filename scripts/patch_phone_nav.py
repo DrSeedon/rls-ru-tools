@@ -13,7 +13,8 @@ Why: phone icons/cards are <div @click>, not <button>, so BeamNG's UI navigation
   3. PhoneWrapper.vue: v-bng-scoped-nav "rls-phone" (no escaping the phone with the D-pad, Back closes
      app -> home -> phone, 300 ms double-back guard), focus on the first icon when opened with a controller,
      visible focus ring, and stick scrolling: left/right stick scroll lists like a mouse wheel (when there is
-     nothing to scroll the left stick moves focus as before).
+     nothing to scroll the left stick moves focus as before); the D-pad also reaches buttons scrolled out of view
+     (the game only focuses elements whose centre is visible, so long lists were cut off).
   4. PhoneHomescreen.vue: hidden icon pages / search page get bng-no-child-nav while not shown.
 
 Usage: python patch_phone_nav.py --mod-dir <unpacked mod> --out-dir <overlay> [--base-overlay <overlay>]
@@ -266,12 +267,57 @@ const onStickNav = e => {
   e.preventDefault()
   if (!stick.raf) stick.raf = requestAnimationFrame(stickLoop)
 }
+// --- gamepad patch: D-pad reaches items below/above the visible part of a list. The game only focuses elements
+// whose centre is actually visible (elementFromPoint occlusion test), so a button scrolled out of its list was
+// unreachable (Employment "Start shift"). If there is no visible target in that direction but a clipped one exists
+// in the same scroll area, we scroll it into view and focus it ourselves.
+const DPAD_DIRS = { focus_d: "d", focus_u: "u", focus_r: "r", focus_l: "l" }
+const DPAD_SEL = 'button:not([disabled]), [bng-nav-item]:not([bng-no-nav="true"]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href]'
+const onDpadNav = e => {
+  const d = e.detail
+  const dir = d && DPAD_DIRS[d.name]
+  if (!dir || d.value !== 1) return
+  const root = phoneRef.value
+  if (!root || !document.contains(root) || !isEntered.value) return
+  const ae = document.activeElement
+  if (!ae || !root.contains(ae)) return
+  const ax = dir === "d" || dir === "u" ? "v" : "h"
+  let area = null
+  for (let n = ae.parentElement; n && n !== root; n = n.parentElement) if (stickCanScroll(n, ax)) { area = n; break }
+  if (!area) return
+  const ar = area.getBoundingClientRect(), cr = ae.getBoundingClientRect()
+  const inDir = r => dir === "d" ? r.top >= cr.bottom - 2 : dir === "u" ? r.bottom <= cr.top + 2 : dir === "r" ? r.left >= cr.right - 2 : r.right <= cr.left + 2
+  const centreVisible = r => {
+    const x = (r.left + r.right) / 2, y = (r.top + r.bottom) / 2
+    return x >= ar.left && x <= ar.right && y >= ar.top && y <= ar.bottom
+  }
+  const cands = [...area.querySelectorAll(DPAD_SEL)]
+    .filter(el => el !== ae && !ae.contains(el) && stickVisible(el) && !el.closest('[bng-no-child-nav="true"]'))
+    .map(el => ({ el, r: el.getBoundingClientRect() }))
+    .filter(c => inDir(c.r))
+  if (!cands.length || cands.some(c => centreVisible(c.r))) return // nothing hidden, or the game can handle it
+  const cx = (cr.left + cr.right) / 2, cy = (cr.top + cr.bottom) / 2
+  const dist = r => ax === "v"
+    ? Math.abs((dir === "d" ? r.top - cr.bottom : cr.top - r.bottom)) + Math.abs((r.left + r.right) / 2 - cx) * 0.5
+    : Math.abs((dir === "r" ? r.left - cr.right : cr.left - r.right)) + Math.abs((r.top + r.bottom) / 2 - cy) * 0.5
+  cands.sort((a, b) => dist(a.r) - dist(b.r))
+  const { el, r } = cands[0]
+  if (dir === "d") area.scrollTop += r.bottom - ar.bottom + 12
+  else if (dir === "u") area.scrollTop -= ar.top - r.top + 12
+  else if (dir === "r") area.scrollLeft += r.right - ar.right + 12
+  else area.scrollLeft -= ar.left - r.left + 12
+  try { navSetFocus(el) } catch (_) { el.focus({ preventScroll: true }) }
+  e.stopPropagation()
+  e.preventDefault()
+}
 onUnmounted(() => {
+  window.removeEventListener("ui_nav", onDpadNav, true)
   window.removeEventListener("ui_nav", onStickNav, true)
   if (stick.raf) cancelAnimationFrame(stick.raf)
 })
 onMounted(() => {
   window.addEventListener("ui_nav", onStickNav, true)
+  window.addEventListener("ui_nav", onDpadNav, true)
   focusScreenEntry("rls-phone", { force: true })
   if (!navControls.focusIfController) return
   setTimeout(phoneEntryFocus, 250)
