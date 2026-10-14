@@ -1,0 +1,9 @@
+{
+  "name": "rls-ru-validate",
+  "private": true,
+  "description": "Compile-check patched .vue/.js files before packing",
+  "dependencies": {
+    "@vue/compiler-sfc": "^3.5.44",
+    "acorn": "^8.19.0"
+  }
+}
