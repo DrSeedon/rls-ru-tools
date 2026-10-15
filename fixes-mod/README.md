@@ -31,3 +31,12 @@ Status: unit-tested with mocks (`luajit test_guard.lua`); in-game confirmation p
 `getState()` returns the live `state.stops` / `state.plans` tables, so the wrapper prunes them in place: stops whose job
 is `complete`/`cancelled`, and stops pointing to neither a job nor a saved plan. Test: `luajit test_route.lua`.
 Note: the "Clear markers" button only clears the ground-marker line on the road (`core_groundMarkers.setPath(nil)`), it never touched the stop list.
+
+## Fix 3: capacity-aware "Auto-order" for the Job Broker route plan
+The stock `optimizeStops` is a greedy nearest-neighbour by road distance that only keeps pickup-before-delivery; it
+ignores cargo space, so it can plan pickups that don't fit. The wrapper reads the player vehicle's (and attached
+trailers') cargo containers from the delivery module's cached container data, counts cargo already on board, keeps
+pickup → delivery precedence and never exceeds capacity per cargo type, builds three starts (greedy, cheapest insertion,
+current order) and improves them with or-opt / 2-opt / swap moves using the same road-distance routing as the broker.
+On any error it falls back to the original. Mock tests: `luajit test_optimize.lua` (1324 checks; vs stock: 0 overloads
+instead of 58/150 at 4 slots, ~13 % shorter routes). In-game: not confirmed yet — grep `rlsRuFixes` in beamng.log.
