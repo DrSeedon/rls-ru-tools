@@ -40,3 +40,6 @@ pickup → delivery precedence and never exceeds capacity per cargo type, builds
 current order) and improves them with or-opt / 2-opt / swap moves using the same road-distance routing as the broker.
 On any error it falls back to the original. Mock tests: `luajit test_optimize.lua` (1324 checks; vs stock: 0 overloads
 instead of 58/150 at 4 slots, ~13 % shorter routes). In-game: not confirmed yet — grep `rlsRuFixes` in beamng.log.
+
+## Fix 4: all "My loads" go into the route plan automatically
+Every reserved / in-progress load on the current map is added to the route plan once per session via the broker's own `plan(jobId)` — no more clicking "Add to route" on each. A load removed from the route by hand is not re-added in the same session. Test: `luajit test_autoadd.lua`.

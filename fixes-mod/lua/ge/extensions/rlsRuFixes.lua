@@ -552,6 +552,32 @@ local function autoOrder(br, orig, ...)
   return orig(...)
 end
 
+-- Fix 4 (Job Broker): every load in "My loads" (reserved or in progress on this map) is added to the route plan
+-- automatically, once per session, instead of clicking "Add to route" on each. A load the player later removes from
+-- the route by hand is not re-added in the same session (seen-set). Uses the broker's own M.plan(jobId).
+local autoAddSeen = {}
+local function autoAddLoads(br, st)
+  if type(st) ~= "table" or type(st.stops) ~= "table" or type(br.plan) ~= "function" then return 0 end
+  local plans = type(st.plans) == "table" and st.plans or {}
+  local inRoute = {}
+  for _, s in ipairs(st.stops) do if s and s.jobId ~= nil then inRoute[s.jobId] = true end end
+  local added = 0
+  for _, j in ipairs(st.jobs or {}) do
+    local id = j and j.id
+    if id ~= nil and not autoAddSeen[id] and (j.status == "reserved" or j.status == "active")
+        and (st.map == nil or j.map == nil or j.map == st.map) then
+      autoAddSeen[id] = true
+      if not inRoute[id] and plans[id] == nil then
+        local ok, res = pcall(br.plan, id)
+        if ok and res then added = added + 1 end
+      end
+    end
+  end
+  return added
+end
+M._autoAddLoads = autoAddLoads
+M._resetAutoAdd = function() autoAddSeen = {} end
+
 local function ensureBroker()
   local br = career_modules_delivery_broker
   if not br then return end
@@ -561,6 +587,8 @@ local function ensureBroker()
       local st = orig(...)
       local ok, n = pcall(pruneRoute, st)
       if ok and n and n > 0 then log("I", "rlsRuFixes", "route plan: pruned " .. n .. " finished/orphan stop(s)") end
+      local ok2, a = pcall(autoAddLoads, br, st)
+      if ok2 and a and a > 0 then log("I", "rlsRuFixes", "route plan: auto-added " .. a .. " load(s) from My loads") end
       return st
     end
     br.__rlsRuGuard = true
