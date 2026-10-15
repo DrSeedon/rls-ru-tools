@@ -246,6 +246,9 @@ const onStickNav = e => {
   if (!ax) return
   const root = phoneRef.value
   if (!root || !document.contains(root) || !isEntered.value) return
+  // focus is in something drawn outside the phone (dropdown/popover list teleported to the body): hands off
+  const fa = document.activeElement
+  if (fa && fa !== document.body && !root.contains(fa)) return
   const val = typeof d.value === "number" ? d.value : 0
   if (Math.abs(val) < STICK_DEAD) { // released
     stick.pass[ax] = false
