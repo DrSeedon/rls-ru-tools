@@ -64,6 +64,9 @@ Every anchor is checked; on a different mod version the script stops with `ANCHO
 
 **Known limits:** list rows inside some apps that have no `@click` handler may still be unreachable with a controller.
 
+## Runtime fixes (`fixes-mod/`)
+A separate tiny mod with nil-guards for crashes we hit while playing (big map / pause menu crash after a police loaner shift). See `fixes-mod/README.md`.
+
 ## Two traps worth knowing (if you build your own patches)
 - **.NET `ZipArchive` in *Update* mode corrupts empty entries** (`stored, csize=2, usize=0`). RLS ships 16 zero-byte
   "switch-off" files (e.g. `levels/west_coast_usa/dynamicAudioEmitters/ribbonData.audioSFX.json`). BeamNG skips the broken

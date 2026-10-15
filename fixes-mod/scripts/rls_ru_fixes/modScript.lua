@@ -1,0 +1,6 @@
+-- rls-ru-tools: small runtime fixes for RLS Career Overhaul (loaded after RLS's own deferred loader)
+core_jobsystem.create(function(job)
+  job.sleep(0.5)
+  setExtensionUnloadMode("rlsRuFixes", "manual")
+  extensions.load("rlsRuFixes")
+end)
