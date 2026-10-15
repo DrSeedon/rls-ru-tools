@@ -24,3 +24,10 @@ Fix: `rlsRuFixes` wraps `getVehicleClass` and `getAggregateScoresFromVehId` to r
 already handle "no class info"); re-installs itself if the career module is reloaded.
 
 Status: unit-tested with mocks (`luajit test_guard.lua`); in-game confirmation pending.
+
+## Fix 2: finished loads never leave the Job Broker route plan
+`broker.lua` removes route stops only on cancel / abandon / un-plan, never when a job is delivered, so the
+"Route plan" tab fills up with finished loads ("Unavailable load") that can't be removed from the UI.
+`getState()` returns the live `state.stops` / `state.plans` tables, so the wrapper prunes them in place: stops whose job
+is `complete`/`cancelled`, and stops pointing to neither a job nor a saved plan. Test: `luajit test_route.lua`.
+Note: the "Clear markers" button only clears the ground-marker line on the road (`core_groundMarkers.setPath(nil)`), it never touched the stop list.
