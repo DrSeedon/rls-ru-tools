@@ -16,6 +16,14 @@ Built against **RLS 2.7.2 + BeamNG.drive 0.39.4** (Windows). Phone navigation wa
 `UINavigation` events (exactly what a gamepad sends in menus) and reading the DOM: focus lands on the first icon, the
 D-pad moves and can't leave the phone, A opens an app, B → home → closes. Stick scrolling and the backdrop fix (14.10.2026) compile cleanly but are not yet confirmed in-game. Feedback from real-controller play is welcome.
 
+## Quick install of the runtime fixes (no scripts needed)
+Download `rls_ru_fixes.zip` from the latest [release](https://github.com/DrSeedon/rls-ru-tools/releases) and drop it into
+`%LOCALAPPDATA%\BeamNG\BeamNG.drive\current\mods\` next to RLS. It does not modify RLS files. Fixes inside (see
+`fixes-mod/README.md`): big map / pause crash after a police loaner shift (#490), route-plan cleanup + capacity-aware
+auto-order + auto-add of "My loads", parked cars that never spawned, double loaner cut (#468), "repair before race" hang
+(#352), cash contract loaner without cash space (#488), nil-position guards (#353/#355), duplicate marketplace offer ids (#457).
+Status: mock-tested (11 test files), partly confirmed in game. Back up your career saves first.
+
 ## Requirements
 - Python 3.8+ (no extra packages)
 - Windows PowerShell 5+ (for packing the zip)
