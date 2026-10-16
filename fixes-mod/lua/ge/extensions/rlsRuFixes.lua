@@ -1006,7 +1006,35 @@ end
 
 local V6 = {ensureLoanerCut, ensureRepairClaim, ensureCashLoaner, ensureDistanceGuard, ensureMarketplace}
 
+-- Fix 7 (log spam): RLS freeroam/organizations.getOrganization logs an ERROR for every lookup of an unknown/empty
+-- id ("Could not find organization with id ..."). Something in career polls it with a missing id, ~2 200 lines per
+-- session, which fills BeamNG's 15 000-line log cap and cuts the useful part. The wrapper returns the same result
+-- (the organization or nil) but logs each unknown id only once.
+local orgMissSeen = {}
+local function ensureOrgQuiet()
+  local org = freeroam_organizations
+  if not org or org.__rlsRuQuiet or type(org.getOrganization) ~= "function" or type(org.getOrganizations) ~= "function" then return end
+  local orig = org.getOrganization
+  org.getOrganization = function(id, ...)
+    local ok, all = pcall(org.getOrganizations)
+    if ok and type(all) == "table" then
+      local o = (id ~= nil) and all[id] or nil
+      if o ~= nil then return o end
+      local key = tostring(id)
+      if not orgMissSeen[key] then
+        orgMissSeen[key] = true
+        log("W", "rlsRuFixes", "organization not found (logged once): " .. key)
+      end
+      return nil
+    end
+    return orig(id, ...)
+  end
+  org.__rlsRuQuiet = true
+  log("I", "rlsRuFixes", "organization-lookup log spam guard installed on freeroam_organizations.getOrganization")
+end
+
 local function ensure()
+  pcall(ensureOrgQuiet)
   pcall(ensureParked)
   for _, f in ipairs(V6) do
     local ok, err = pcall(f)

@@ -15,6 +15,7 @@ expect test_route.lua      "stops left:	s3,s4"
 expect test_autoadd.lua    "AUTOADD OK"
 expect test_parked.lua     "PARKED OK"
 expect test_optimize.lua   "checks, 0 failed"
+expect test_v7_org.lua    "ORG OK"
 for t in test_v6_*.lua; do
   [ "$t" = test_v6_common.lua ] && continue
   expect "$t" "checks, 0 failed"

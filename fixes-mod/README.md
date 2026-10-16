@@ -55,3 +55,6 @@ RLS `gameplay/trafficConfigFilter` wraps `core_multiSpawn.createGroup` and drops
 - **#457** duplicate marketplace offer ids in old saves are renumbered on load.
 - Parked passthrough excludes forklifts / forkable loads.
 Run `bash run_all_tests.sh`.
+
+## Fix 7: organization lookup log spam
+`freeroam_organizations.getOrganization` logs an ERROR for every unknown/empty id; in career something polls it (~2 200 lines per session), which fills BeamNG's 15 000-line log cap and cuts useful lines. The wrapper returns the same result but logs each unknown id once. Test: `luajit test_v7_org.lua`.
