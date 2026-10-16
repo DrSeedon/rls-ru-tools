@@ -602,7 +602,62 @@ local function ensureBroker()
   end
 end
 
+-- Fix 5 (parked cars): RLS gameplay/trafficConfigFilter wraps core_multiSpawn.createGroup and drops every config
+-- with no engine / zero power as a "broken roller". Parking asks only for Type=propparked configs (static parked
+-- variants that have no engine by design), so the parked group always came back empty ("want N, got 0" ->
+-- "Parked vehicle group is empty!"). For parked-only requests we call the unfiltered vanilla createGroup (found as
+-- the RLS wrapper's upvalue `originalCreateGroup`); police configs stay excluded by the request's own Config Type
+-- filter. Everything else keeps the RLS filter.
+local function isParkedIntent(params)
+  local f = type(params) == "table" and params.filters
+  local t = type(f) == "table" and f.Type
+  if type(t) ~= "table" then return false end
+  local parked = (tonumber(t.propparked) or tonumber(t.PropParked) or 0) > 0
+  if not parked then return false end
+  for k, v in pairs(t) do
+    local key = string.lower(tostring(k))
+    if key ~= "propparked" and (tonumber(v) or 0) > 0 then return false end
+  end
+  return true
+end
+M._isParkedIntent = isParkedIntent
+
+local function findUpvalue(fn, name)
+  if type(debug) ~= "table" or type(debug.getupvalue) ~= "function" then return nil end
+  for i = 1, 60 do
+    local n, v = debug.getupvalue(fn, i)
+    if n == nil then return nil end
+    if n == name then return v end
+  end
+  return nil
+end
+
+local function ensureParked()
+  local ms = core_multiSpawn
+  if not ms or ms.__rlsRuParked or not ms._rlsTrafficConfigFilterWrapped or type(ms.createGroup) ~= "function" then return end
+  local rlsWrapped = ms.createGroup
+  local vanilla = findUpvalue(rlsWrapped, "originalCreateGroup")
+  if type(vanilla) ~= "function" then
+    ms.__rlsRuParked = true
+    log("W", "rlsRuFixes", "parked passthrough: original createGroup not found, parked filter left as is")
+    return
+  end
+  ms.createGroup = function(amount, params)
+    if isParkedIntent(params) then
+      local ok, out = pcall(vanilla, amount, params)
+      if ok and type(out) == "table" then
+        log("D", "rlsRuFixes", "parked group: " .. #out .. " config(s) via unfiltered createGroup")
+        return out
+      end
+    end
+    return rlsWrapped(amount, params)
+  end
+  ms.__rlsRuParked = true
+  log("I", "rlsRuFixes", "parked passthrough installed on core_multiSpawn.createGroup")
+end
+
 local function ensure()
+  pcall(ensureParked)
   ensureBroker()
   local vp = career_modules_vehiclePerformance
   if vp and not vp.__rlsRuGuard then
