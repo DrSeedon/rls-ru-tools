@@ -46,3 +46,12 @@ Every reserved / in-progress load on the current map is added to the route plan 
 
 ## Fix 5: parked cars never spawned
 RLS `gameplay/trafficConfigFilter` wraps `core_multiSpawn.createGroup` and drops configs with no engine / zero power as "broken rollers". Parking requests only `Type=propparked` configs — static parked variants without engines by design — so the parked group was always empty (`Traffic group short after filter: want N, got 0` → `Parked vehicle group is empty!`). For parked-only requests the fix calls the unfiltered vanilla `createGroup` (the RLS wrapper's upvalue `originalCreateGroup`); police stays excluded by the request's own Config Type filter; everything else keeps the RLS filter. Test: `luajit test_parked.lua`.
+
+## v6 fixes (from the RLS issue tracker; mock-tested, in-game confirmation pending)
+- **#468** only one loaner cut applies (the largest) when truck and trailer come from different orgs; payout never goes negative from cuts (wraps `career_modules_delivery_employment.applyEmploymentPayToBreakdown`). Vehicle-delivery path not covered (local function).
+- **#352** "repair before race" hang: `makeRepairClaim` normalises `{money=N}` → `N` (same idea as PR #479).
+- **#488** cash contracts only get a loaner with cash capacity (wraps `canHaulMaterial`).
+- **#353/#355** nil-position guard on `getDistanceBetweenLocations` / generator `distanceBetween` (mostly already guarded in 2.7.2).
+- **#457** duplicate marketplace offer ids in old saves are renumbered on load.
+- Parked passthrough excludes forklifts / forkable loads.
+Run `bash run_all_tests.sh`.

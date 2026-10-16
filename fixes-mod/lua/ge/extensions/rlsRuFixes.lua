@@ -622,6 +622,38 @@ local function isParkedIntent(params)
 end
 M._isParkedIntent = isParkedIntent
 
+-- Fix 6 (#422 risk): the unfiltered vanilla pool must never park a forklift, wheel loader or forkable load.
+-- Markers: RLS's own forklift list (usedCarAuctionLots.lua:967-974) + the RLS-shipped models TPUMedForklift
+-- (Body Style "Forklift", Type "Truck"), TPUForkableLoads (Type "Prop") and vanilla wl40 (Montevalle loader).
+local PARKED_EXCLUDE_MARKERS = {
+  "forklift", "forktruck", "wheelloader", "telehandler", "blockforks", "palletforks",
+  "forkable", "tpumedforklift", "tpuforkableloads", "wl40",
+}
+M.parkedExcludeMarkers = PARKED_EXCLUDE_MARKERS
+local function parkedToken(s) return (string.gsub(string.lower(tostring(s or "")), "[^%w]", "")) end
+local function isExcludedParked(entry)
+  if type(entry) ~= "table" then return false end
+  local model, config = parkedToken(entry.model), parkedToken(entry.config)
+  for _, m in ipairs(PARKED_EXCLUDE_MARKERS) do
+    if string.find(model, m, 1, true) or string.find(config, m, 1, true) then return true end
+  end
+  return false
+end
+local function filterParkedGroup(list)
+  local kept, removed, names = {}, 0, {}
+  for _, e in ipairs(list) do
+    if isExcludedParked(e) then
+      removed = removed + 1
+      names[#names + 1] = tostring(e.model) .. "/" .. tostring(e.config)
+    else
+      kept[#kept + 1] = e
+    end
+  end
+  M._lastParkedExcluded = table.concat(names, ", ")
+  return kept, removed
+end
+M._filterParkedGroup = filterParkedGroup
+
 local function findUpvalue(fn, name)
   if type(debug) ~= "table" or type(debug.getupvalue) ~= "function" then return nil end
   for i = 1, 60 do
@@ -646,8 +678,17 @@ local function ensureParked()
     if isParkedIntent(params) then
       local ok, out = pcall(vanilla, amount, params)
       if ok and type(out) == "table" then
-        log("D", "rlsRuFixes", "parked group: " .. #out .. " config(s) via unfiltered createGroup")
-        return out
+        local okF, kept, removed = pcall(filterParkedGroup, out)
+        if okF and type(kept) == "table" then
+          if removed > 0 then
+            log("I", "rlsRuFixes", string.format("parked group: excluded %d forklift/loader/prop config(s) (%s)",
+              removed, tostring(M._lastParkedExcluded)))
+          end
+          if #kept > 0 then
+            log("D", "rlsRuFixes", "parked group: " .. #kept .. " config(s) via unfiltered createGroup")
+            return kept
+          end
+        end
       end
     end
     return rlsWrapped(amount, params)
@@ -656,8 +697,321 @@ local function ensureParked()
   log("I", "rlsRuFixes", "parked passthrough installed on core_multiSpawn.createGroup")
 end
 
+-- =============================================================================================================
+-- v6 fixes
+-- =============================================================================================================
+local TAG = "rlsRuFixes"
+
+-- ---- Fix 7 (#468): only one loaner cut per delivered cargo -------------------------------------------------
+-- Vanilla parcelManager.getRewardsWithBreakdown adds one "loaner" breakdown entry (money = -cut * reward) per
+-- organisation in cargo.loanerOrganisations, so a loaner truck + loaner trailer from two orgs pay two cuts and the
+-- payout goes negative. RLS post-processes that result in employment.applyEmploymentPayToBreakdown (called via the
+-- module table, progress.lua:857-859). We run after it: keep only the largest loaner money cut, give back the
+-- others (their reputation rewards stay), and never let the kept cut push the payout below zero.
+local function capLoanerCuts(breakdown, adjusted)
+  if type(breakdown) ~= "table" or type(adjusted) ~= "table" then return nil end
+  local cuts = {}
+  for i, bd in ipairs(breakdown) do
+    if type(bd) == "table" and bd.simpleBreakdownType == "loaner" and type(bd.rewards) == "table" then
+      local m = tonumber(bd.rewards.money)
+      if m and m < 0 then cuts[#cuts + 1] = {i = i, m = m} end
+    end
+  end
+  if #cuts == 0 then return nil end
+  local keep = cuts[1]
+  for _, c in ipairs(cuts) do if c.m < keep.m then keep = c end end
+  local money = tonumber(adjusted.money) or 0
+  local refund = 0
+  for _, c in ipairs(cuts) do if c ~= keep then refund = refund - c.m end end
+  local after = money + refund
+  local give = 0
+  if after < 0 then give = math.min(-after, -keep.m) end
+  if refund <= 0 and give <= 0 then return nil end
+  local out, drop = {}, {}
+  for _, c in ipairs(cuts) do if c ~= keep then drop[c.i] = true end end
+  for i, bd in ipairs(breakdown) do
+    if drop[i] then
+      local r = {}
+      for k, v in pairs(bd.rewards) do if k ~= "money" then r[k] = v end end
+      if next(r) then
+        local e = {}
+        for k, v in pairs(bd) do e[k] = v end
+        e.rewards = r
+        out[#out + 1] = e
+      end
+    elseif i == keep.i and give > 0 then
+      local e, r = {}, {}
+      for k, v in pairs(bd) do e[k] = v end
+      for k, v in pairs(bd.rewards) do r[k] = v end
+      local m = keep.m + give
+      r.money = math.abs(m) > 1e-9 and m or nil
+      e.rewards = r
+      out[#out + 1] = e
+    else
+      out[#out + 1] = bd
+    end
+  end
+  local adj = {}
+  for k, v in pairs(adjusted) do adj[k] = v end
+  adj.money = after + give
+  return out, adj, {cuts = #cuts, refund = refund, clamp = give, before = money, after = adj.money}
+end
+M._capLoanerCuts = capLoanerCuts
+
+local function ensureLoanerCut()
+  local emp = career_modules_delivery_employment
+  if not emp or emp.__rlsRuLoanerCut or type(emp.applyEmploymentPayToBreakdown) ~= "function" then return end
+  local orig = emp.applyEmploymentPayToBreakdown
+  emp.applyEmploymentPayToBreakdown = function(...)
+    local o, b, a = orig(...)
+    local ok, nb, na, info = pcall(capLoanerCuts, b, a)
+    if ok and nb then
+      log("I", TAG, string.format("loaner cut: %d loaner cuts -> 1, refunded %.2f, clamp %.2f, money %.2f -> %.2f",
+        info.cuts, info.refund, info.clamp, info.before, info.after))
+      return o, nb, na
+    end
+    if not ok then log("W", TAG, "loaner cut: error, payout left as is: " .. tostring(nb)) end
+    return o, b, a
+  end
+  emp.__rlsRuLoanerCut = true
+  log("I", TAG, "single-loaner-cut fix installed on career_modules_delivery_employment.applyEmploymentPayToBreakdown")
+end
+
+-- ---- Fix 8 (#352): mission "repair before start" passes {deductible = {money = N}} -----------------------------
+-- missionManager.lua:695 calls insurance.makeRepairClaim(invId, {deductible = price}, vehInfo) with
+-- price = {money = N} (or {vouchers = N}); RLS insurance.lua:665-667 adds the values as numbers and throws in an
+-- onUpdate step, so the mission start step repeats forever. Normalise table costs to their money amount
+-- (same rule as the proposed upstream patch, PR #479). The money itself was already paid by missionManager.
+local function normaliseRepairCosts(costs)
+  if type(costs) ~= "table" then return nil end
+  local out, changed = {}, false
+  for k, v in pairs(costs) do
+    if type(v) == "table" then out[k] = tonumber(v.money) or 0; changed = true else out[k] = v end
+  end
+  return changed and out or nil
+end
+M._normaliseRepairCosts = normaliseRepairCosts
+
+local function ensureRepairClaim()
+  local ins = career_modules_insurance_insurance
+  if not ins or ins.__rlsRuRepairClaim or type(ins.makeRepairClaim) ~= "function" then return end
+  local orig = ins.makeRepairClaim
+  ins.makeRepairClaim = function(invVehId, costs, ...)
+    local ok, fixed = pcall(normaliseRepairCosts, costs)
+    if ok and fixed then
+      log("I", TAG, "repair claim: table-shaped cost normalised to money (mission pre-repair, #352)")
+      return orig(invVehId, fixed, ...)
+    end
+    return orig(invVehId, costs, ...)
+  end
+  ins.__rlsRuRepairClaim = true
+  log("I", TAG, "table-cost fix installed on career_modules_insurance_insurance.makeRepairClaim")
+end
+
+-- ---- Fix 9 (#488): cash contracts need a cash-capable loaner --------------------------------------------------
+-- loanerCapabilities.lua:266-268 answers canHaulMaterial(offer, "cash") with canDoParcelJob(offer), so any box
+-- truck qualifies, while cargoScreen only loads cash into containers whose cargoTypes include "cash". For cash we
+-- require evidence of a cash container: capacity metadata (profile.capacityByType.cash > 0) or a money/armored
+-- marker in the config name or its parts. Unknown profile -> original answer.
+local CASH_MARKERS = {"money", "cash", "armored", "armoured"}
+local cashPartsCache = {}
+local function hasCashMarker(s)
+  s = string.lower(tostring(s or ""))
+  for _, m in ipairs(CASH_MARKERS) do if string.find(s, m, 1, true) then return true end end
+  return false
+end
+local function cashEvidence(caps, offer)
+  if type(offer) ~= "table" or type(caps.getProfile) ~= "function" then return nil end
+  local profile = caps.getProfile(offer)
+  if type(profile) ~= "table" then return nil end
+  local byType = type(profile.capacityByType) == "table" and profile.capacityByType or {}
+  if (tonumber(byType.cash) or 0) > 0 then return true, "capacity" end
+  local model, config = offer.model or profile.model, offer.config or profile.config
+  if hasCashMarker(config) or hasCashMarker(offer.name) then return true, "name" end
+  local key = tostring(model) .. "/" .. tostring(config)
+  local hit = cashPartsCache[key]
+  if hit == nil then
+    hit = false
+    local cv = core_vehicles
+    if cv and type(cv.getConfigParts) == "function" and model and config then
+      local okP, parts = pcall(cv.getConfigParts, model, config)
+      if okP and type(parts) == "table" then
+        for _, v in pairs(parts) do if hasCashMarker(v) then hit = true break end end
+      end
+    end
+    cashPartsCache[key] = hit
+  end
+  if hit then return true, "parts" end
+  return false, "no cash container"
+end
+M._cashEvidence = cashEvidence
+M._resetCashCache = function() cashPartsCache = {} end
+
+local cashLogged = {}
+local function ensureCashLoaner()
+  local caps = career_modules_delivery_loanerCapabilities
+  if not caps or caps.__rlsRuCash or type(caps.canHaulMaterial) ~= "function" then return end
+  local orig = caps.canHaulMaterial
+  caps.canHaulMaterial = function(offer, cargoType, ...)
+    if cargoType == "cash" then
+      local ok, res = pcall(cashEvidence, caps, offer)
+      if ok and res ~= nil then
+        local okO, before = pcall(orig, offer, cargoType, ...)
+        if okO and (before and true or false) ~= res then
+          local key = tostring(offer.model) .. "/" .. tostring(offer.config)
+          if not cashLogged[key] then
+            cashLogged[key] = true
+            log("I", TAG, string.format("cash loaner: %s %s for cash (RLS said %s)", key,
+              res and "allowed" or "rejected", tostring(before)))
+          end
+        end
+        return res
+      end
+      if not ok then log("W", TAG, "cash loaner: error, RLS rule used: " .. tostring(res)) end
+    end
+    return orig(offer, cargoType, ...)
+  end
+  caps.__rlsRuCash = true
+  log("I", TAG, "cash-capacity check installed on career_modules_delivery_loanerCapabilities.canHaulMaterial")
+end
+
+-- ---- Fix 10 (#353/#355): nil position into map.findClosestRoad ------------------------------------------------
+-- facilityScanner.getDistanceBetweenLocations (facilityScanner.lua:287-293) passes posA/posB straight to
+-- map.findClosestRoad, which indexes nil. In 2.7.2 both known callers already check for nil first
+-- (generator.lua:133, cargoScreen.lua:1380), and generator caches the function in a local (generator.lua:106), so
+-- this guard only covers the module export and generator's export M.distanceBetween (used by cargoScreen).
+local distGuardHits = 0
+local function guardDistance(orig)
+  return function(a, b, ...)
+    if a == nil or b == nil then
+      distGuardHits = distGuardHits + 1
+      if distGuardHits == 1 or distGuardHits % 100 == 0 then
+        log("I", TAG, "distance guard: nil position (" .. (a == nil and "A" or "B") .. "), returned 0 (hits " .. distGuardHits .. ")")
+      end
+      return 0, false
+    end
+    return orig(a, b, ...)
+  end
+end
+local function ensureDistanceGuard()
+  local scanner = package and package.loaded and package.loaded["gameplay/delivery/facilityScanner"]
+  if type(scanner) == "table" and not scanner.__rlsRuDist and type(scanner.getDistanceBetweenLocations) == "function" then
+    scanner.getDistanceBetweenLocations = guardDistance(scanner.getDistanceBetweenLocations)
+    scanner.__rlsRuDist = true
+    log("I", TAG, "nil-position guard installed on facilityScanner.getDistanceBetweenLocations")
+  end
+  local gen = career_modules_delivery_generator
+  if gen and not gen.__rlsRuDist and type(gen.distanceBetween) == "function" then
+    gen.distanceBetween = guardDistance(gen.distanceBetween)
+    gen.__rlsRuDist = true
+    log("I", TAG, "nil-position guard installed on career_modules_delivery_generator.distanceBetween")
+  end
+end
+
+-- ---- Fix 11 (#457): duplicate / missing marketplace offer ids ---------------------------------------------------
+-- 2.7.2 resolves accept/decline/negotiate by offer.id (marketplace.lua:428-436, 664-674); the UI falls back to a
+-- row index of the reversed list when id is nil (VehicleMarketplace.vue:230-247). Offers from 2.6.x saves have no
+-- id, and duplicated ids make findOfferById hit only the first one. We give every id-less or duplicate offer a fresh
+-- unique id (same 0..999999 scheme as generateOfferId), and move offers stored under non-sequence keys (old saves
+-- written as JSON objects) back into the array. Live data = upvalue listedVehicles of the exported getListings.
+local function sanitizeOffers(listed, rand)
+  rand = rand or math.random
+  local stats = {assigned = 0, renumbered = 0, rekeyed = 0}
+  if type(listed) ~= "table" then return stats end
+  local used, fix = {}, {}
+  for _, listing in ipairs(listed) do
+    local offers = type(listing) == "table" and listing.offers
+    if type(offers) == "table" then
+      local n, extra = 0, {}
+      while offers[n + 1] ~= nil do n = n + 1 end
+      for k, v in pairs(offers) do
+        if not (type(k) == "number" and k >= 1 and k <= n and k % 1 == 0) then extra[#extra + 1] = {k = k, v = v} end
+      end
+      if #extra > 0 then
+        table.sort(extra, function(x, y)
+          local a, b = tonumber(x.k), tonumber(y.k)
+          if a and b and a ~= b then return a < b end
+          if (a == nil) ~= (b == nil) then return a ~= nil end
+          return tostring(x.k) < tostring(y.k)
+        end)
+        for _, e in ipairs(extra) do offers[e.k] = nil end
+        for _, e in ipairs(extra) do
+          if type(e.v) == "table" then n = n + 1; offers[n] = e.v; stats.rekeyed = stats.rekeyed + 1 end
+        end
+      end
+      for i = 1, n do
+        local offer = offers[i]
+        if type(offer) == "table" then
+          if offer.id == nil then fix[#fix + 1] = offer; stats.assigned = stats.assigned + 1
+          elseif used[offer.id] then fix[#fix + 1] = offer; stats.renumbered = stats.renumbered + 1
+          else used[offer.id] = true end
+        end
+      end
+    end
+  end
+  for _, offer in ipairs(fix) do
+    local id
+    for _ = 1, 1000 do
+      id = math.floor(rand() * 1000000)
+      if not used[id] then break end
+    end
+    used[id] = true
+    offer.id = id
+  end
+  return stats
+end
+M._sanitizeOffers = sanitizeOffers
+
+local mpCheckCountdown, mpLastListed = 0, nil
+local function sanitizeMarketplace(fn, why)
+  local listed = findUpvalue(fn, "listedVehicles")
+  if type(listed) ~= "table" then return end
+  mpLastListed = listed
+  local s = sanitizeOffers(listed)
+  if s.assigned + s.renumbered + s.rekeyed > 0 then
+    log("I", TAG, string.format("marketplace offers (%s): %d id(s) assigned, %d duplicate id(s) renumbered, %d offer(s) re-keyed",
+      why, s.assigned, s.renumbered, s.rekeyed))
+  end
+end
+
+local function ensureMarketplace()
+  local mp = career_modules_marketplace
+  if not mp or type(mp.getListings) ~= "function" then return end
+  if not mp.__rlsRuOffers then
+    local orig = mp.getListings
+    if type(findUpvalue(orig, "listedVehicles")) ~= "table" then
+      mp.__rlsRuOffers = true
+      log("W", TAG, "marketplace offer-id fix: listedVehicles not reachable, not installed")
+      return
+    end
+    mp.getListings = function(...)
+      local ok, err = pcall(sanitizeMarketplace, orig, "getListings")
+      if not ok then log("W", TAG, "marketplace offer-id fix: error: " .. tostring(err)) end
+      return orig(...)
+    end
+    mp.__rlsRuOffers = orig
+    mpLastListed = nil
+    log("I", TAG, "offer-id fix installed on career_modules_marketplace.getListings")
+  end
+  -- also fix freshly loaded saves before the menu is opened (cheap check every ~300 frames)
+  mpCheckCountdown = mpCheckCountdown - 1
+  if mpCheckCountdown <= 0 and type(mp.__rlsRuOffers) == "function" then
+    mpCheckCountdown = 300
+    local listed = findUpvalue(mp.__rlsRuOffers, "listedVehicles")
+    if type(listed) == "table" and listed ~= mpLastListed then
+      pcall(sanitizeMarketplace, mp.__rlsRuOffers, "load")
+    end
+  end
+end
+
+local V6 = {ensureLoanerCut, ensureRepairClaim, ensureCashLoaner, ensureDistanceGuard, ensureMarketplace}
+
 local function ensure()
   pcall(ensureParked)
+  for _, f in ipairs(V6) do
+    local ok, err = pcall(f)
+    if not ok and not M._v6err then M._v6err = true; log("W", TAG, "v6 install error: " .. tostring(err)) end
+  end
   ensureBroker()
   local vp = career_modules_vehiclePerformance
   if vp and not vp.__rlsRuGuard then
